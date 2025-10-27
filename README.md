@@ -17,9 +17,9 @@ The current version of the software includes the following policies:
 + **f4:** based on Facebook’s storage architecture; includes a fast layer for hot files and a lower-throughput layer for  warm files. Tiering is based on the age: files younger than 
 3 months old are hot while older files are warm.
 
-## Requirements
-+ Python 2.7
-+ Simpy 3
+## Data Trace Column
++ COLUMN_TIMESTAMP | COLUMN_ID | COLUMN_SIZE_FILE | COLUMN_TYPE_REQUEST
+
 
 ## Installation
 + pip install simpy
