@@ -21,25 +21,38 @@ SIZE_FILE_UNIT = 'KB'
 TRANSFER_RATE_UNIT = 'MB/s'
 
 # ***** The columns fields positions are considered Starting in 0 (zero) *****
-# Configure the number field position at Trace's file for column id filename
-COLUMN_ID = 1
+# OLD FORMAT (for ssd_caching, hashed, f4 policies):
+# COLUMN_TIMESTAMP = 0
+# COLUMN_ID = 1
+# COLUMN_SIZE_FILE = 2
+# COLUMN_TYPE_REQUEST = 3
 
-# Configure the number field position at Trace's file for column timestamp
-COLUMN_TIMESTAMP = 0
+# NEW FORMAT (for rl_c51 policy):
+# Format: operation, LBA, block_size, inter_arrival_time, service_time, idle_time
+COLUMN_OPERATION = 0       # 'read' or 'write'
+COLUMN_LBA = 1             # Logical Block Address (file identifier)
+COLUMN_BLOCK_SIZE = 2      # Block/request size in bytes
+COLUMN_INTER_ARRIVAL = 3   # Time between requests (seconds)
+COLUMN_SERVICE_TIME = 4    # Service time (seconds)
+COLUMN_IDLE_TIME = 5       # Idle time (seconds)
 
-# Configure the number field position at Trace's file for column size file.
-# If there is no column file size set the value to '-'. By default in the simulation, the size file will be DEFAULT_SIZE_FILE
-COLUMN_SIZE_FILE = 2
-
-# Configure the number field position at Trace's file for column type of request, just supported Read or Write operations.
-# If there is no type of request set the value to '-'. By default the simulation assumes only Read request operations
-COLUMN_TYPE_REQUEST = 3
+# Legacy columns (kept for backward compatibility with old policies)
+# COLUMN_TIMESTAMP = 0
+# COLUMN_ID = 1
+# COLUMN_SIZE_FILE = 2
+# COLUMN_TYPE_REQUEST = 3
 
 # Configure the timestamp unit second [s], millisecond [ms], microsecond [us] or nanosecond [ns] at Trace's file
 TIMESTAMP_UNIT = 'ns'
 
 # Configure the Replacement Policy to be used in the simulation
-REPLACEMENT_POLICY = 'hashed' 
+# REPLACEMENT_POLICY = 'ssd_caching' 
+# REPLACEMENT_POLICY = 'Hashed' 
+# REPLACEMENT_POLICY = 'f4' 
+REPLACEMENT_POLICY = 'rl_c51' # new RL placement policy
+
+# Optional: select device for torch ("cpu" or "cuda")
+RL_DEVICE = 'cuda'
 
 
 # # Size used un replacement policy simulation
@@ -51,12 +64,16 @@ REPLACEMENT_POLICY = 'hashed'
 # SSD Capacity: 
 SSD_CAPACITY_BYTES = 100  * 1024 * 1024  # 100MB
 RAM_CAPACITY_BYTES = 1  * 1024 * 1024   # 1MB
-# Total of devices used in each layer to perform the simulation
 
+# Eviction Policy when capacity is exceeded
+# Options: 'LRU' (Least Recently Used), 'FIFO' (First In First Out), 'LFU' (Least Frequently Used)
+EVICTION_POLICY = 'LRU'
+
+# Total of devices used in each layer to perform the simulation
 NUMBER_SSD = 4146
 NUMBER_HDD = 4146
 
 # Path to the trace file to be loaded
 # Set to None to read from stdin, or provide a file path like 'converted_trace.txt'
-FILE_PATH = 'converted_trace.txt'
+FILE_PATH = 'wdev_3.revised'
 

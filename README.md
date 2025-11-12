@@ -19,6 +19,7 @@ The current version of the software includes the following policies:
 
 ## Data Trace Column
 + COLUMN_TIMESTAMP | COLUMN_ID | COLUMN_SIZE_FILE | COLUMN_TYPE_REQUEST
++ Example: 0.000003537,1540175,8,write
 
 
 ## Installation
