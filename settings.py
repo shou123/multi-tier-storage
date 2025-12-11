@@ -21,35 +21,33 @@ SIZE_FILE_UNIT = 'KB'
 TRANSFER_RATE_UNIT = 'MB/s'
 
 # ***** The columns fields positions are considered Starting in 0 (zero) *****
-# OLD FORMAT (for ssd_caching, hashed, f4 policies):
-# COLUMN_TIMESTAMP = 0
-# COLUMN_ID = 1
-# COLUMN_SIZE_FILE = 2
-# COLUMN_TYPE_REQUEST = 3
+# OLD FORMAT (for ssd_caching, hashed, f4, all_ram, all_ssd, all_hdd policies):
+COLUMN_TIMESTAMP = 0       # Column 0: timestamp
+COLUMN_ID = 1              # Column 1: file_id (or LBA)
+COLUMN_SIZE_FILE = 2       # Column 2: file_size (or block_size)
+COLUMN_TYPE_REQUEST = 3    # Column 3: operation type (read/write)
 
 # NEW FORMAT (for rl_c51 policy):
-# Format: operation, LBA, block_size, inter_arrival_time, service_time, idle_time
-COLUMN_OPERATION = 0       # 'read' or 'write'
-COLUMN_LBA = 1             # Logical Block Address (file identifier)
-COLUMN_BLOCK_SIZE = 2      # Block/request size in bytes
-COLUMN_INTER_ARRIVAL = 3   # Time between requests (seconds)
-COLUMN_SERVICE_TIME = 4    # Service time (seconds)
-COLUMN_IDLE_TIME = 5       # Idle time (seconds)
-
-# Legacy columns (kept for backward compatibility with old policies)
-# COLUMN_TIMESTAMP = 0
-# COLUMN_ID = 1
-# COLUMN_SIZE_FILE = 2
-# COLUMN_TYPE_REQUEST = 3
+# Format: timestamp, operation, LBA, block_size, seq/rand, inter_arrival, service_time, idle_time
+# Only used: operation, LBA, block_size, service_time
+# Note: inter_arrival and idle_time are read but not used in RL reward calculation
+COLUMN_OPERATION = 1       # Column 1: operation (WS=write, RS=read)
+COLUMN_LBA = 2             # Column 2: Logical Block Address (file identifier)
+COLUMN_BLOCK_SIZE = 3      # Column 3: Block/request size in bytes
+COLUMN_SERVICE_TIME = 6    # Column 6: Service time (seconds) - only used for RL reward
 
 # Configure the timestamp unit second [s], millisecond [ms], microsecond [us] or nanosecond [ns] at Trace's file
 TIMESTAMP_UNIT = 'ns'
 
 # Configure the Replacement Policy to be used in the simulation
-# REPLACEMENT_POLICY = 'ssd_caching' 
-# REPLACEMENT_POLICY = 'Hashed' 
-# REPLACEMENT_POLICY = 'f4' 
-REPLACEMENT_POLICY = 'rl_c51' # new RL placement policy
+# Available policies:
+# REPLACEMENT_POLICY = 'ssd_caching'   # SSD caching strategy
+# REPLACEMENT_POLICY = 'hashed'        # Hashed placement
+# REPLACEMENT_POLICY = 'f4'            # F4 strategy
+REPLACEMENT_POLICY = 'rl_c51'        # RL-based placement
+# REPLACEMENT_POLICY = 'all_ram'       # All data to RAM
+# REPLACEMENT_POLICY = 'all_ssd'       # All data to SSD
+# REPLACEMENT_POLICY = 'all_hdd'       # All data to HDD
 
 # Optional: select device for torch ("cpu" or "cuda")
 RL_DEVICE = 'cuda'
@@ -62,8 +60,8 @@ RL_DEVICE = 'cuda'
 # RAM_CAPACITY = 10
 
 # SSD Capacity: 
-SSD_CAPACITY_BYTES = 100  * 1024 * 1024  # 100MB
-RAM_CAPACITY_BYTES = 1  * 1024 * 1024   # 1MB
+SSD_CAPACITY_BYTES = 100 * 1024 * 1024 * 1024  # 100GB
+RAM_CAPACITY_BYTES = 10 * 1024 * 1024 * 1024   # 10GB
 
 # Eviction Policy when capacity is exceeded
 # Options: 'LRU' (Least Recently Used), 'FIFO' (First In First Out), 'LFU' (Least Frequently Used)
@@ -75,5 +73,8 @@ NUMBER_HDD = 4146
 
 # Path to the trace file to be loaded
 # Set to None to read from stdin, or provide a file path like 'converted_trace.txt'
-FILE_PATH = 'wdev_3.revised'
+# FILE_PATH = 'data_trace/MSRC/src2_1.revised'
+FILE_PATH = 'data_trace/MSRC/wdev_3.revised'
+# FILE_PATH = 'data_trace/MSRC/src1_1.revised'
+
 

@@ -9,8 +9,8 @@ def start_environment():
     trace = Trace.Trace(env, concurrent_access_hdd, concurrent_access_ssd)
     
     # Choose trace format based on replacement policy
-    if settings.REPLACEMENT_POLICY.lower() == 'rl_c51':
-        # RL policy uses new trace format: operation, LBA, block_size, inter_arrival, service_time, idle_time
+    if settings.REPLACEMENT_POLICY.lower() in ['rl_c51', 'all_ram', 'all_ssd', 'all_hdd']:
+        # These policies use the new trace format: timestamp, operation, LBA, block_size, seq/rand, inter_arrival, service_time, idle_time
         env.process(trace.source_trace_rl(file_path=settings.FILE_PATH))
     else:
         # Legacy policies use old format: timestamp, id, size, type
@@ -18,10 +18,16 @@ def start_environment():
                                        settings.COLUMN_TYPE_REQUEST, file_path=settings.FILE_PATH))
     env.run()
     
+    # NEW: Shutdown unified agent system
+    trace.agent_system.shutdown()
+    
     # Print storage status after simulation completes
     print("\n" + "="*80)
     trace.print_storage_status()
     print("="*80 + "\n")
+    
+    # Get migration statistics from unified agent system
+    migration_stats = trace.agent_system.get_statistics()
     
     avg_served_time_HDD = 0
     avg_served_time_SSD = 0
@@ -76,10 +82,25 @@ def start_environment():
 
     summary = summary + 'Average Served Time in RAM tier:    ' + str(avg_served_time_RAM_hour) + ' [h]' + '\n'
     summary = summary + 'Average Served Time in SSDs tier:   ' + str(avg_served_time_SSD_hour) + ' [h]' + '\n'
-    summary = summary + 'Average Served Time in HDDs tier:   ' + str(avg_served_time_HDD_hour) + ' [h]'
+    summary = summary + 'Average Served Time in HDDs tier:   ' + str(avg_served_time_HDD_hour) + ' [h]' + '\n'
+    
+    # NEW: Add Data Migration Statistics (LBA-based)
+    summary = summary + '\n# Data Migration Statistics (LBA-based)\n'
+    summary = summary + 'Total LBAs Tracked:                 ' + str(migration_stats['total_lbas_tracked']) + '\n'
+    summary = summary + 'Hot LBAs (access >= 5):             ' + str(migration_stats['hot_lbas']) + '\n'
+    summary = summary + 'Cold LBAs (access <= 1):            ' + str(migration_stats['cold_lbas']) + '\n'
+    summary = summary + 'Total LBA Operations:               ' + str(migration_stats['total_lba_operations']) + '\n'
+    summary = summary + 'LBAs Migrated:                      ' + str(migration_stats['lbas_migrated']) + '\n'
+    summary = summary + 'Total Migrations Across LBAs:       ' + str(migration_stats['total_migrations_across_lbas']) + '\n'
+    summary = summary + 'Migrations Enqueued:                ' + str(migration_stats['migrations_enqueued']) + '\n'
+    summary = summary + 'Migrations Completed:               ' + str(migration_stats['migrations_completed']) + '\n'
+    summary = summary + 'Total I/O Requests:                 ' + str(migration_stats['total_requests']) + '\n'
+    summary = summary + 'Avg Reward:                         ' + str(round(migration_stats['avg_reward'], 5)) + '\n'
+    summary = summary + 'Migration Queue Size:               ' + str(migration_stats['queue_size']) + '\n'
+    summary = summary + 'Queue Full:                         ' + str(migration_stats['queue_full'])
 
     # print summary
-    with open('summary.txt', 'w') as f:
+    with open('summary_migration_info.txt', 'w') as f:
         f.write(summary)
 
 start_environment()
