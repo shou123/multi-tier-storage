@@ -4,6 +4,7 @@ from storageDevice import SolidStateDrive
 from storageDevice import Ram
 import settings
 from placement_policy_rl import RLPlacement
+from migration_agent_system import MigrationAgentSystem
 
 READS_SSD = 0
 READS_HDD = 0
@@ -86,6 +87,21 @@ class Trace:
             self.ram = Ram(capacity_bytes=ram_capacity_bytes)
             self.rl = RLPlacement(ssd_cap=ssd_capacity_bytes, ram_cap=ram_capacity_bytes,
                                   device=getattr(settings, 'RL_DEVICE', 'cpu'))
+        
+        # NEW: Initialize unified agent system (works with all policies)
+        self.agent_system = MigrationAgentSystem(
+            ssd_capacity_bytes=ssd_capacity_bytes,
+            ram_capacity_bytes=ram_capacity_bytes,
+            env=self.env,
+            placement_agent=getattr(self, 'rl', None)  # Pass RL agent if it exists
+        )
+        self.agent_check_counter = 0
+        
+        print("[INIT] Migration Agent System initialized")
+        print(f"  SSD capacity: {ssd_capacity_bytes / 1e9:.1f}GB")
+        print(f"  RAM capacity: {ram_capacity_bytes / 1e9:.1f}GB")
+        print(f"  Placement policy: {self.replacement_policy}")
+        print(f"  Migration enabled: Yes")
 
 
     def source_trace(self, delimeter, column_id, column_timestamp, column_size, column_type_operation, file_path=None):
@@ -141,6 +157,15 @@ class Trace:
                 inter_arrival_s = float(campos[5]) if len(campos) > 5 else 0.0
                 is_read = (type_operation.lower() == 'read')
                 self.env.process(self.transfer_with_rl(file_id, size_file, is_read, is_seq, inter_arrival_s))
+            elif self.replacement_policy == 'all_ram':
+                is_read = (type_operation.lower() == 'read')
+                self.env.process(self.transfer_with_all_ram(file_id, size_file, is_read))
+            elif self.replacement_policy == 'all_ssd':
+                is_read = (type_operation.lower() == 'read')
+                self.env.process(self.transfer_with_all_ssd(file_id, size_file, is_read))
+            elif self.replacement_policy == 'all_hdd':
+                is_read = (type_operation.lower() == 'read')
+                self.env.process(self.transfer_with_all_hdd(file_id, size_file, is_read))
         
         # Close file if it was opened (not stdin)
         if file_path:
@@ -184,14 +209,21 @@ class Trace:
             is_read = bool(raw['is_read'])
             service_time_s = raw['service']  # service_time in seconds (only used for RL reward)
             
-            # Process request with RL placement policy
-            self.env.process(self.transfer_with_rl_state(
-                file_id=file_id,
-                size_file=size_file,
-                is_read=is_read,
-                state_vec=state_vec,
-                service_time_s=service_time_s  # Pass service_time for reward calculation
-            ))
+            # Process request based on replacement policy
+            if self.replacement_policy == 'rl_c51':
+                self.env.process(self.transfer_with_rl_state(
+                    file_id=file_id,
+                    size_file=size_file,
+                    is_read=is_read,
+                    state_vec=state_vec,
+                    service_time_s=service_time_s
+                ))
+            elif self.replacement_policy == 'all_ram':
+                self.env.process(self.transfer_with_all_ram(file_id, size_file, is_read))
+            elif self.replacement_policy == 'all_ssd':
+                self.env.process(self.transfer_with_all_ssd(file_id, size_file, is_read))
+            elif self.replacement_policy == 'all_hdd':
+                self.env.process(self.transfer_with_all_hdd(file_id, size_file, is_read))
 
     def transfer_with_hashed(self, file_id, size_file, type_operation):
         locationSelected = ''
@@ -425,8 +457,12 @@ class Trace:
             yield self.env.timeout(int(transferDuration))
             returned_time = self.env.now
             served_time = returned_time - arrived_time
-            global SSD_SERVED_TIME, HDD_SERVED_TIME, READS_RAM
-            READS_RAM += 1 if is_read else 0
+            global READS_RAM, WRITES_RAM, RAM_SERVED_TIME
+            RAM_SERVED_TIME += served_time
+            if is_read:
+                READS_RAM += 1
+            else:
+                WRITES_RAM += 1
             # no device resource contention when RAM
             locationSelected = 'RAM'
         elif tier == 'SSD':
@@ -438,8 +474,12 @@ class Trace:
                 yield self.env.timeout(transferDuration)
                 returned_time = self.env.now
                 served_time = returned_time - arrived_time
-                global SSD_SERVED_TIME
+                global SSD_SERVED_TIME, READS_SSD, WRITES_SSD
                 SSD_SERVED_TIME += served_time
+                if is_read:
+                    READS_SSD += 1
+                else:
+                    WRITES_SSD += 1
         else:
             transferDuration = int((size_file / float(trHDD)) * self.second_to_nanosecond)
             locationSelected = 'HDD'
@@ -449,8 +489,12 @@ class Trace:
                 yield self.env.timeout(transferDuration)
                 returned_time = self.env.now
                 served_time = returned_time - arrived_time
-                global HDD_SERVED_TIME
+                global HDD_SERVED_TIME, READS_HDD, WRITES_HDD
                 HDD_SERVED_TIME += served_time
+                if is_read:
+                    READS_HDD += 1
+                else:
+                    WRITES_HDD += 1
     
         # Latency accounting for reward: latency = service time only (I/O time)
         # Removed: inter-arrival time and idle time
@@ -571,12 +615,189 @@ class Trace:
     
         # Update agent with outcome
         self.rl.set_last_tier(str(file_id), locationSelected)
+        
+        # CRITICAL: Provide RL reward for learning
+        # The RL agent will compute reward internally from latency_s
+        # (typically R = 1 / latency for inverse relationship)
+        # Use service_time_s from trace as the actual latency experienced
+        
+        # Push experience to RL agent's replay buffer for learning
+        self.rl.observe(latency_s=service_time_s,
+            next_is_read=is_read,
+            next_size_bytes=size_file,
+            next_is_seq=False,  # Not available in this path, default to False
+            next_inter_arrival_s=0.0,  # Not available in this path
+            ssd_used=self.ssd_used_bytes,
+            ssd_cap=settings.SSD_CAPACITY_BYTES,
+            ram_used=self.ram_used_bytes,
+            ram_cap=settings.RAM_CAPACITY_BYTES,
+            file_id=str(file_id),
+            done=False)
     
         # Emit CSV output (ms units)
         arrived_ms = int(arrived_time * self.nanosecond_to_millisecond)
         returned_ms = int(returned_time * self.nanosecond_to_millisecond)
         served_ms = int(served_time_ns * self.nanosecond_to_millisecond)
         print(f"{file_id},{locationSelected}")
+        
+        # NEW: Track for migration agent system
+        self.agent_system.track_io_request(
+            file_id=int(file_id),
+            tier=locationSelected,
+            latency_ns=served_time_ns,
+            size_bytes=size_file,
+            is_read=is_read
+        )
+        
+        # NEW: Periodic migration check (every 50 requests)
+        self.agent_check_counter += 1
+        if self.agent_check_counter % 50 == 0:
+            self.agent_system.periodic_update(
+                ssd_usage=self.ssd_used_bytes,
+                ram_usage=self.ram_used_bytes
+            )
+
+    def transfer_with_all_ram(self, file_id, size_file, is_read):
+        """All data stored in RAM tier only."""
+        transferDuration = 10  # ns for RAM hit
+        arrived_time = self.env.now
+        yield self.env.timeout(int(transferDuration))
+        returned_time = self.env.now
+        served_time_ns = returned_time - arrived_time
+        
+        global READS_RAM, WRITES_RAM, RAM_SERVED_TIME
+        RAM_SERVED_TIME += served_time_ns
+        if is_read:
+            READS_RAM += 1
+        else:
+            WRITES_RAM += 1
+        
+        locationSelected = 'RAM'
+        
+        # Track capacity
+        size_b = int(size_file)
+        self.check_ram_capacity(file_id, size_b)
+        
+        # Emit CSV output (ms units)
+        arrived_ms = int(arrived_time * self.nanosecond_to_millisecond)
+        returned_ms = int(returned_time * self.nanosecond_to_millisecond)
+        served_ms = int(served_time_ns * self.nanosecond_to_millisecond)
+        print(f"{file_id},{arrived_ms},{returned_ms},{served_ms},{locationSelected}")
+        
+        # NEW: Track for unified agent system
+        self.agent_system.track_io_request(
+            file_id=int(file_id),
+            tier=locationSelected,
+            latency_ns=served_time_ns,
+            size_bytes=size_file,
+            is_read=is_read
+        )
+        
+        # NEW: Periodic migration check (every 50 requests)
+        self.agent_check_counter += 1
+        if self.agent_check_counter % 50 == 0:
+            self.agent_system.periodic_update(
+                ssd_usage=self.ssd_used_bytes,
+                ram_usage=self.ram_used_bytes
+            )
+
+    def transfer_with_all_ssd(self, file_id, size_file, is_read):
+        """All data stored in SSD tier only."""
+        if is_read:
+            trSSD = self.read_transferRateSSD
+        else:
+            trSSD = self.write_transferRateSSD
+        
+        transferDuration = int((size_file / float(trSSD)) * self.second_to_nanosecond)
+        locationSelected = 'SSD'
+        
+        with self.concurrent_access_ssd.request() as req:
+            arrived_time = self.env.now
+            yield req
+            yield self.env.timeout(transferDuration)
+            returned_time = self.env.now
+            served_time_ns = returned_time - arrived_time
+            
+            global SSD_SERVED_TIME, READS_SSD, WRITES_SSD
+            SSD_SERVED_TIME += served_time_ns
+            if is_read:
+                READS_SSD += 1
+            else:
+                WRITES_SSD += 1
+        
+        # Track capacity
+        size_b = int(size_file)
+        self.check_ssd_capacity(file_id, size_b)
+        
+        # Emit CSV output (ms units)
+        arrived_ms = int(arrived_time * self.nanosecond_to_millisecond)
+        returned_ms = int(returned_time * self.nanosecond_to_millisecond)
+        served_ms = int(served_time_ns * self.nanosecond_to_millisecond)
+        print(f"{file_id},{arrived_ms},{returned_ms},{served_ms},{locationSelected}")
+        
+        # NEW: Track for unified agent system
+        self.agent_system.track_io_request(
+            file_id=int(file_id),
+            tier=locationSelected,
+            latency_ns=served_time_ns,
+            size_bytes=size_file,
+            is_read=is_read
+        )
+        
+        # NEW: Periodic migration check (every 50 requests)
+        self.agent_check_counter += 1
+        if self.agent_check_counter % 50 == 0:
+            self.agent_system.periodic_update(
+                ssd_usage=self.ssd_used_bytes,
+                ram_usage=self.ram_used_bytes
+            )
+
+    def transfer_with_all_hdd(self, file_id, size_file, is_read):
+        """All data stored in HDD tier only."""
+        if is_read:
+            trHDD = self.read_transferRateHDD
+        else:
+            trHDD = self.write_transferRateHDD
+        
+        transferDuration = int((size_file / float(trHDD)) * self.second_to_nanosecond)
+        locationSelected = 'HDD'
+        
+        with self.concurrent_access_hdd.request() as req:
+            arrived_time = self.env.now
+            yield req
+            yield self.env.timeout(transferDuration)
+            returned_time = self.env.now
+            served_time_ns = returned_time - arrived_time
+            
+            global HDD_SERVED_TIME, READS_HDD, WRITES_HDD
+            HDD_SERVED_TIME += served_time_ns
+            if is_read:
+                READS_HDD += 1
+            else:
+                WRITES_HDD += 1
+        
+        # Emit CSV output (ms units)
+        arrived_ms = int(arrived_time * self.nanosecond_to_millisecond)
+        returned_ms = int(returned_time * self.nanosecond_to_millisecond)
+        served_ms = int(served_time_ns * self.nanosecond_to_millisecond)
+        print(f"{file_id},{arrived_ms},{returned_ms},{served_ms},{locationSelected}")
+        
+        # NEW: Track for unified agent system
+        self.agent_system.track_io_request(
+            file_id=int(file_id),
+            tier=locationSelected,
+            latency_ns=served_time_ns,
+            size_bytes=size_file,
+            is_read=is_read
+        )
+        
+        # NEW: Periodic migration check (every 50 requests)
+        self.agent_check_counter += 1
+        if self.agent_check_counter % 50 == 0:
+            self.agent_system.periodic_update(
+                ssd_usage=self.ssd_used_bytes,
+                ram_usage=self.ram_used_bytes
+            )
 
     def timedelta_total_seconds(self, timedelta):
         return (timedelta.microseconds + 0.0 +(timedelta.seconds + timedelta.days * 24 * 3600) * 10 ** 6) / 10 ** 6

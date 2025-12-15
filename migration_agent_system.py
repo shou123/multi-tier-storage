@@ -9,7 +9,9 @@ This Migration Agent:
 2. Identifies hot LBAs (access >= 5) and cold LBAs (access <= 1)
 3. Enqueues migration candidates for tier optimization
 4. Executes migrations in background thread
-5. Calculates delayed rewards: migrations_completed / avg_latency
+5. Calculates delayed rewards: (migrations_in_window / avg_latency) - penalty
+   - Uses windowed migration count (not unbounded accumulation)
+   - Includes penalty term to discourage excessive migrations (ping-pong)
 
 Integration with Trace.py:
     # At Trace.__init__()
@@ -279,10 +281,13 @@ class MigrationAgentSystem:
         # Statistics tracking
         self.placement_decisions = deque(maxlen=1000)
         self.latency_window = deque(maxlen=self.REWARD_WINDOW_SIZE)
+        self.migration_window = deque(maxlen=self.REWARD_WINDOW_SIZE)  # Track migrations per window
         self.request_count = 0
         self.migrations_enqueued = 0
+        self.migrations_completed_total = 0  # Total migrations (for stats only)
         self.total_rewards = []
         self.lba_migration_map = {}  # Track LBA -> tier transitions
+        self.last_migration_time = 0  # Track when last migration occurred
         
         # Threading
         self.lock = threading.Lock()
@@ -332,10 +337,16 @@ class MigrationAgentSystem:
             ram_usage: Current RAM usage in bytes
         """
         with self.lock:
-            # Step 1: Identify migration candidates
+            # Step 1: Track completed migrations in current window
+            current_completed = self.migration_executor.get_completed_count()
+            migrations_since_last = current_completed - self.migrations_completed_total
+            self.migrations_completed_total = current_completed
+            self.migration_window.append(migrations_since_last)
+            
+            # Step 2: Identify migration candidates
             candidates = self._identify_migration_candidates(ssd_usage, ram_usage)
             
-            # Step 2: Enqueue migrations
+            # Step 3: Enqueue migrations
             if candidates:
                 enqueued = self._enqueue_migrations(candidates)
                 if enqueued > 0:
@@ -345,11 +356,13 @@ class MigrationAgentSystem:
                         print(f"  Page {c.file_id}: {c.current_tier} → "
                               f"{c.target_tier} (score: {c.hotness_score:.2f})")
             
-            # Step 3: Calculate delayed reward
+            # Step 4: Calculate delayed reward
             reward, stats = self._calculate_delayed_reward()
             if stats and 'avg_latency' in stats:
                 print(f"[{self.env.now if self.env else time.time():.2f}s] "
                       f"Migration reward: {reward:.2f}, "
+                      f"Migrations: {stats['migrations_in_window']}, "
+                      f"Penalty: {stats['penalty']:.2f}, "
                       f"Avg latency: {stats['avg_latency']:.0f}ns")
     
     def _identify_migration_candidates(self, ssd_usage: int, ram_usage: int) -> List[MigrationCandidate]:
@@ -418,35 +431,54 @@ class MigrationAgentSystem:
         return enqueued
     
     def _calculate_delayed_reward(self) -> Tuple[float, Optional[Dict]]:
-        """Calculate delayed reward based on migrations completed and latency.
+        """Calculate delayed reward based on migrations in window and latency.
         
-        Reward = migrations_completed / avg_latency
-        Higher reward when more migrations are completed with lower latency.
+        Closer to Harmonia approach:
+        - Uses windowed migration count (not unbounded accumulation)
+        - Includes penalty term to discourage excessive migrations
+        - Reward = (migrations_in_window / avg_latency) - penalty
+        
+        Penalty discourages ping-pong migrations and excessive movement.
         """
         if len(self.latency_window) < self.REWARD_WINDOW_SIZE:
             return 0.0, None
         
-        migrations_completed = self.migration_executor.get_completed_count()
-        if migrations_completed == 0:
+        # Get migrations in current window (not global count)
+        migrations_in_window = sum(self.migration_window)
+        if migrations_in_window == 0:
             return 0.0, None
         
-        # Calculate average latency
+        # Calculate average latency over window
         avg_latency = np.mean(list(self.latency_window))
         total_latency = np.sum(list(self.latency_window))
         
-        # Reward: migrations_completed / avg_latency
-        # Avoid division by zero - if latency is very small, cap it at 1e-9
+        # Avoid division by zero
         if avg_latency < 1e-9:
             avg_latency = 1e-9
         
-        reward = migrations_completed / (avg_latency / 1e9)  # avg_latency in seconds
+        # Base reward: migrations benefit vs latency cost
+        avg_latency_s = avg_latency / 1e9  # Convert to seconds
+        base_reward = migrations_in_window / avg_latency_s
+        
+        # Penalty term: discourage excessive migrations (ping-pong behavior)
+        # Penalty increases with migration rate relative to request rate
+        migration_rate = migrations_in_window / len(self.latency_window)
+        penalty = 0.0
+        if migration_rate > 0.1:  # If >10% of requests trigger migrations
+            penalty = (migration_rate - 0.1) * 100  # Linear penalty beyond threshold
+        
+        # Final reward with penalty
+        reward = base_reward - penalty
         
         stats = {
             'avg_latency': avg_latency,
             'total_latency': total_latency,
             'num_requests': len(self.latency_window),
-            'migrations_completed': migrations_completed,
-            'reward_calculation': f"{migrations_completed} / {avg_latency / 1e9:.6f}s"
+            'migrations_in_window': migrations_in_window,
+            'migration_rate': migration_rate,
+            'base_reward': base_reward,
+            'penalty': penalty,
+            'reward_calculation': f"({migrations_in_window} / {avg_latency_s:.6f}s) - {penalty:.2f}"
         }
         
         self.total_rewards.append(reward)
@@ -468,6 +500,10 @@ class MigrationAgentSystem:
             # Calculate total migrations across all LBAs
             total_migrations_across_lbas = sum(lba.get('migration_count', 0) for lba in all_lbas.values())
             
+            # Calculate migration rate over window
+            migrations_in_window = sum(self.migration_window) if self.migration_window else 0
+            migration_rate = migrations_in_window / len(self.migration_window) if self.migration_window else 0.0
+            
             return {
                 'total_lbas_tracked': len(all_lbas),
                 'hot_lbas': hot_lbas,
@@ -476,6 +512,8 @@ class MigrationAgentSystem:
                 'total_requests': self.request_count,
                 'migrations_enqueued': self.migrations_enqueued,
                 'migrations_completed': self.migration_executor.get_completed_count(),
+                'migrations_in_window': migrations_in_window,
+                'migration_rate': migration_rate,
                 'lbas_migrated': migrated_lbas,
                 'total_migrations_across_lbas': total_migrations_across_lbas,
                 'queue_size': self.migration_queue.size(),
@@ -499,6 +537,8 @@ class MigrationAgentSystem:
         print(f"  Total migrations across LBAs: {stats['total_migrations_across_lbas']}")
         print(f"  Migrations enqueued: {stats['migrations_enqueued']}")
         print(f"  Migrations completed: {stats['migrations_completed']}")
+        print(f"  Migrations in window: {stats['migrations_in_window']}")
+        print(f"  Migration rate: {stats['migration_rate']:.2%}")
         print(f"  Avg reward: {stats['avg_reward']:.2f}")
 
 
